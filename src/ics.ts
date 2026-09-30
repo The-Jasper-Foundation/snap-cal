@@ -12,13 +12,23 @@ export interface CalEvent {
   reminders: number[];
 }
 
-export function buildIcs(ev: CalEvent, now = new Date(), uid = randomUid()): string {
+/** One .ics file holding one or more events, so a whole listing imports in one go. */
+export function buildIcs(events: CalEvent | CalEvent[], now = new Date(), uid = randomUid()): string {
+  const list = Array.isArray(events) ? events : [events];
   const lines = [
     'BEGIN:VCALENDAR',
     'VERSION:2.0',
     'PRODID:-//Snap Cal//Poster to Calendar//EN',
     'CALSCALE:GREGORIAN',
     'METHOD:PUBLISH',
+    ...list.flatMap((ev, i) => vevent(ev, now, list.length > 1 ? `${i + 1}-${uid}` : uid)),
+    'END:VCALENDAR',
+  ];
+  return lines.map(fold).join('\r\n') + '\r\n';
+}
+
+function vevent(ev: CalEvent, now: Date, uid: string): string[] {
+  return [
     'BEGIN:VEVENT',
     `UID:${uid}`,
     `DTSTAMP:${utcStamp(now)}`,
@@ -36,9 +46,7 @@ export function buildIcs(ev: CalEvent, now = new Date(), uid = randomUid()): str
       'END:VALARM',
     ]),
     'END:VEVENT',
-    'END:VCALENDAR',
   ];
-  return lines.map(fold).join('\r\n') + '\r\n';
 }
 
 export function icsFileName(title: string): string {

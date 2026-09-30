@@ -47,6 +47,17 @@ describe('buildIcs', () => {
   });
 });
 
+describe('buildIcs with several events', () => {
+  it('puts every event in one calendar with its own UID', () => {
+    const ics = buildIcs([ev, { ...ev, title: 'Second' }], NOW, 'abc');
+    expect(ics.match(/BEGIN:VCALENDAR/g)).toHaveLength(1);
+    expect(ics.match(/BEGIN:VEVENT/g)).toHaveLength(2);
+    expect(ics).toContain('UID:1-abc');
+    expect(ics).toContain('UID:2-abc');
+    expect(ics).toContain('SUMMARY:Second');
+  });
+});
+
 describe('fold', () => {
   it('keeps every physical line within 75 bytes, counting multi-byte characters', () => {
     const long = 'DESCRIPTION:' + 'Café night 🎉 '.repeat(20);

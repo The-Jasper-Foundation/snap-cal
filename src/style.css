@@ -241,6 +241,64 @@ input[aria-invalid='true'] {
   border-color: var(--danger);
 }
 
+.event-list {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.event-list li {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  overflow: hidden;
+}
+.event-list li.active {
+  border-color: var(--accent);
+  box-shadow: inset 4px 0 0 var(--accent);
+}
+.event-list .include {
+  display: flex;
+  align-items: center;
+  padding: 0 4px 0 14px;
+  cursor: pointer;
+}
+.event-list .include input {
+  accent-color: var(--accent);
+  width: 20px;
+  height: 20px;
+  margin: 0;
+}
+.event-list .pick {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.event-list .pick strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.event-list .pick small {
+  color: var(--muted);
+}
+.event-list li.excluded .pick {
+  opacity: 0.55;
+}
+.last-day[hidden] {
+  display: none;
+}
+
 .row {
   display: grid;
   grid-template-columns: 1fr 1fr;

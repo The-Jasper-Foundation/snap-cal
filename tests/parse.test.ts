@@ -82,6 +82,12 @@ describe('parseEvent', () => {
     expect([fri.start!.getFullYear(), fri.start!.getDay()]).toEqual([2025, 5]);
   });
 
+  it('does not read a title ending in "Night" as tonight', () => {
+    const ev = parseEvent('Quiz Night\nThursday 8th October, 7pm', [], { ref: new Date(2026, 8, 30) });
+    expect([ev.start!.getMonth(), ev.start!.getDate(), ev.start!.getHours()]).toEqual([9, 8, 19]);
+    expect(ev.title).toBe('Quiz Night');
+  });
+
   it('ignores "book now" and returns no date when there is none', () => {
     const ev = parseEvent('Open Mic Night\nBook now!', [], { ref: REF });
     expect(ev.start).toBeNull();

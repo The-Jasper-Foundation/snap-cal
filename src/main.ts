@@ -3,7 +3,7 @@ import { type HistoryEntry, clearHistory, loadHistory, saveToHistory } from './h
 import { type CalEvent, buildIcs, icsFileName } from './ics';
 import { googleCalendarUrl, outlookCalendarUrl } from './links';
 import { readPoster, thumbnail } from './ocr';
-import { type DraftEvent, normalise, parseEvent } from './parse';
+import { type DraftEvent, parseEvents } from './parse';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -15,8 +15,12 @@ const progressFill = $('progress-fill');
 const progressText = $('progress-text');
 const errorBox = $('error');
 const review = $('review');
+const reviewHeading = $('review-heading');
+const reviewHint = $('review-hint');
+const eventList = $<HTMLUListElement>('event-list');
 const form = $<HTMLFormElement>('event-form');
 const formError = $('form-error');
+const submitLabel = $('submit-label');
 const googleLink = $<HTMLAnchorElement>('google-link');
 const outlookLink = $<HTMLAnchorElement>('outlook-link');
 const historyCard = $('history');
@@ -24,8 +28,21 @@ const historyList = $<HTMLUListElement>('history-list');
 const dropOverlay = $('drop-overlay');
 
 const field = (name: string) => form.elements.namedItem(name) as HTMLInputElement | HTMLTextAreaElement;
+const allDayBox = () => field('allDay') as HTMLInputElement;
+const TEXT_FIELDS = ['title', 'date', 'lastDate', 'startTime', 'endTime', 'location', 'notes'];
 const DEFAULT_DURATION_MS = 2 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
+/** The event form's values, as strings, so they can go straight into history. */
+type Values = Record<string, string>;
+interface Item {
+  values: Values;
+  selected: boolean;
+}
+
+// The events found in the current scan. The form edits items[active].
+let items: Item[] = [];
+let active = 0;
 let current: { id: string; thumb: string; text: string } | null = null;
 let busy = false;
 
@@ -87,15 +104,14 @@ async function scan(file: File) {
 
   try {
     const { text, lines } = await readPoster(file, setProgress);
-    const draft = parseEvent(text, lines, { dayFirst: !navigator.language.startsWith('en-US') });
-    const notes = normalise(text);
-    fillForm(draft, notes);
-
-    current = { id: newId(), thumb: await thumbnail(file).catch(() => ''), text: notes };
+    const drafts = parseEvents(text, lines, { dayFirst: !navigator.language.startsWith('en-US') });
+    current = {
+      id: newId(),
+      thumb: await thumbnail(file).catch(() => ''),
+      text: drafts.map((d) => d.notes).join('\n\n'),
+    };
+    showItems(drafts.map((d) => ({ values: draftToValues(d), selected: true })));
     remember();
-
-    review.hidden = false;
-    review.scrollIntoView({ behavior: 'smooth', block: 'start' });
     field('title').focus({ preventScroll: true });
     if (!text.trim()) {
       showError('We couldn’t find any text. Try a sharper, straight-on photo, or fill in the details yourself.');
@@ -123,30 +139,117 @@ function showError(msg: string) {
   errorBox.hidden = !msg;
 }
 
-// ---------- The event form ----------
+// ---------- The list of events ----------
 
-function fillForm(d: DraftEvent, notes: string) {
-  field('title').value = d.title;
-  field('location').value = d.location;
-  field('notes').value = notes;
-  (field('allDay') as HTMLInputElement).checked = d.allDay;
-  field('date').value = d.start ? toDateInput(d.start) : '';
-  field('startTime').value = d.start && !d.allDay ? toTimeInput(d.start) : '';
-  field('endTime').value = d.end && !d.allDay ? toTimeInput(d.end) : '';
-  syncForm();
+function showItems(next: Item[]) {
+  items = next;
+  review.hidden = false;
+  selectItem(0);
+  review.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-function formValues(): Record<string, string> {
-  const values: Record<string, string> = {};
-  for (const name of ['title', 'date', 'startTime', 'endTime', 'location', 'notes']) values[name] = field(name).value;
-  values.allDay = String((field('allDay') as HTMLInputElement).checked);
-  values.reminders = checkedReminders().join(',');
+function selectItem(i: number) {
+  active = i;
+  restoreForm(items[i].values);
+  formError.hidden = true;
+  renderEventList();
+}
+
+function renderEventList() {
+  const many = items.length > 1;
+  eventList.hidden = !many;
+  reviewHeading.textContent = many ? `We found ${items.length} events` : 'Check the details';
+  reviewHint.textContent = many
+    ? 'Untick any you don’t want. Tap an event to check its details below.'
+    : 'We filled these in from the poster. Fix anything we got wrong.';
+
+  const chosen = items.filter((it) => it.selected).length;
+  submitLabel.textContent = many ? `Add ${chosen} event${chosen === 1 ? '' : 's'} to calendar` : 'Add to calendar';
+  if (!many) return;
+
+  eventList.replaceChildren(
+    ...items.map((item, i) => {
+      const li = document.createElement('li');
+      li.classList.toggle('active', i === active);
+      li.classList.toggle('excluded', !item.selected);
+
+      const include = document.createElement('label');
+      include.className = 'include';
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.checked = item.selected;
+      box.setAttribute('aria-label', `Include ${item.values.title || 'this event'}`);
+      box.addEventListener('change', () => {
+        item.selected = box.checked;
+        renderEventList();
+      });
+      include.append(box);
+
+      const pick = document.createElement('button');
+      pick.type = 'button';
+      pick.className = 'pick';
+      if (i === active) pick.setAttribute('aria-current', 'true');
+      const strong = document.createElement('strong');
+      strong.textContent = item.values.title || 'Untitled event';
+      const small = document.createElement('small');
+      small.textContent = summarise(item.values);
+      pick.append(strong, small);
+      pick.addEventListener('click', () => {
+        selectItem(i);
+        field('title').focus({ preventScroll: true });
+        form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+
+      li.append(include, pick);
+      return li;
+    }),
+  );
+}
+
+/** "Fri 2 Oct, 21:00 · Hot Numbers" */
+function summarise(v: Values): string {
+  if (!v.date) return 'No date found — tap to add one';
+  const [y, m, d] = v.date.split('-').map(Number);
+  let when = new Date(y, m - 1, d).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+  if (v.allDay === 'true' && v.lastDate && v.lastDate !== v.date) {
+    const [ly, lm, ld] = v.lastDate.split('-').map(Number);
+    when += ` – ${new Date(ly, lm - 1, ld).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`;
+  } else if (v.allDay !== 'true' && v.startTime) {
+    when += `, ${v.startTime}`;
+  }
+  return v.location ? `${when} · ${v.location}` : when;
+}
+
+// ---------- The event form ----------
+
+function draftToValues(d: DraftEvent): Values {
+  const lastDay = d.allDay && d.end ? new Date(d.end.getTime() - DAY_MS) : d.start;
+  return {
+    title: d.title,
+    date: d.start ? toDateInput(d.start) : '',
+    lastDate: lastDay ? toDateInput(lastDay) : '',
+    startTime: d.start && !d.allDay ? toTimeInput(d.start) : '',
+    endTime: d.end && !d.allDay ? toTimeInput(d.end) : '',
+    location: d.location,
+    notes: d.notes,
+    allDay: String(d.allDay),
+    reminders: '30',
+  };
+}
+
+function formValues(): Values {
+  const values: Values = {};
+  for (const name of TEXT_FIELDS) values[name] = field(name).value;
+  values.allDay = String(allDayBox().checked);
+  values.reminders = [...form.querySelectorAll<HTMLInputElement>('input[name="reminder"]:checked')]
+    .map((cb) => cb.value)
+    .join(',');
   return values;
 }
 
-function restoreForm(values: Record<string, string>) {
-  for (const name of ['title', 'date', 'startTime', 'endTime', 'location', 'notes']) field(name).value = values[name] ?? '';
-  (field('allDay') as HTMLInputElement).checked = values.allDay === 'true';
+function restoreForm(values: Values) {
+  for (const name of TEXT_FIELDS) field(name).value = values[name] ?? '';
+  allDayBox().checked = values.allDay === 'true';
   const reminders = (values.reminders ?? '30').split(',');
   form.querySelectorAll<HTMLInputElement>('input[name="reminder"]').forEach((cb) => {
     cb.checked = reminders.includes(cb.value);
@@ -154,33 +257,27 @@ function restoreForm(values: Record<string, string>) {
   syncForm();
 }
 
-function checkedReminders(): number[] {
-  return [...form.querySelectorAll<HTMLInputElement>('input[name="reminder"]:checked')].map((cb) => Number(cb.value));
-}
-
-/** Reads the form into an event, or returns a message saying what's missing. */
-function readForm(): CalEvent | string {
-  const title = field('title').value.trim();
-  const date = field('date').value;
-  const allDay = (field('allDay') as HTMLInputElement).checked;
-  const startTime = field('startTime').value;
-  const endTime = field('endTime').value;
-
+/** Turns saved form values into an event, or returns a message saying what's missing. */
+function toEvent(v: Values): CalEvent | string {
+  const title = v.title.trim();
+  const allDay = v.allDay === 'true';
   if (!title) return 'Give the event a name.';
-  if (!date) return 'Choose the date of the event.';
-  if (!allDay && !startTime) return 'Add a start time, or tick “All day”.';
+  if (!v.date) return 'Choose the date of the event.';
+  if (!allDay && !v.startTime) return 'Add a start time, or tick “All day”.';
 
-  const [y, m, d] = date.split('-').map(Number);
+  const [y, m, d] = v.date.split('-').map(Number);
   let start: Date;
   let end: Date;
   if (allDay) {
     start = new Date(y, m - 1, d);
-    end = new Date(y, m - 1, d + 1);
+    const [ly, lm, ld] = (v.lastDate || v.date).split('-').map(Number);
+    end = new Date(ly, lm - 1, ld + 1);
+    if (end <= start) return 'The last day can’t be before the first day.';
   } else {
-    const [sh, sm] = startTime.split(':').map(Number);
+    const [sh, sm] = v.startTime.split(':').map(Number);
     start = new Date(y, m - 1, d, sh, sm);
-    if (endTime) {
-      const [eh, em] = endTime.split(':').map(Number);
+    if (v.endTime) {
+      const [eh, em] = v.endTime.split(':').map(Number);
       end = new Date(y, m - 1, d, eh, em);
       if (end <= start) end = new Date(y, m - 1, d + 1, eh, em); // finishes after midnight
     } else {
@@ -193,17 +290,18 @@ function readForm(): CalEvent | string {
     start,
     end,
     allDay,
-    location: field('location').value.trim(),
-    description: field('notes').value.trim(),
-    reminders: checkedReminders(),
+    location: v.location.trim(),
+    description: v.notes.trim(),
+    reminders: v.reminders ? v.reminders.split(',').map(Number) : [],
   };
 }
 
 function syncForm() {
-  const allDay = (field('allDay') as HTMLInputElement).checked;
+  const allDay = allDayBox().checked;
   (form.querySelector('.times') as HTMLElement).hidden = allDay;
+  (form.querySelector('.last-day') as HTMLElement).hidden = !allDay;
 
-  const ev = readForm();
+  const ev = toEvent(formValues());
   for (const link of [googleLink, outlookLink]) {
     if (typeof ev === 'string') {
       link.removeAttribute('href');
@@ -215,15 +313,22 @@ function syncForm() {
   }
 }
 
-form.addEventListener('input', () => {
+function onFormEdit() {
+  // Ticking "All day" on an event with no last day yet: default to one day.
+  if (allDayBox().checked && !field('lastDate').value) field('lastDate').value = field('date').value;
   syncForm();
+  if (items[active]) {
+    items[active].values = formValues();
+    renderEventList();
+  }
   formError.hidden = true;
-});
-form.addEventListener('change', syncForm);
+}
+form.addEventListener('input', onFormEdit);
+form.addEventListener('change', onFormEdit);
 
 for (const link of [googleLink, outlookLink]) {
   link.addEventListener('click', (e) => {
-    const ev = readForm();
+    const ev = toEvent(formValues());
     if (typeof ev === 'string') {
       e.preventDefault();
       showFormError(ev);
@@ -235,16 +340,28 @@ for (const link of [googleLink, outlookLink]) {
 
 form.addEventListener('submit', (e) => {
   e.preventDefault();
-  const ev = readForm();
-  if (typeof ev === 'string') {
-    showFormError(ev);
+  const chosen = items.map((item, i) => ({ item, i })).filter(({ item }) => item.selected);
+  if (chosen.length === 0) {
+    showFormError('Tick at least one event to add.');
     return;
   }
-  const blob = new Blob([buildIcs(ev)], { type: 'text/calendar;charset=utf-8' });
+  const events: CalEvent[] = [];
+  for (const { item, i } of chosen) {
+    const ev = toEvent(item.values);
+    if (typeof ev === 'string') {
+      // Show the event that needs fixing.
+      selectItem(i);
+      showFormError(items.length > 1 ? `“${item.values.title || 'Untitled event'}”: ${ev}` : ev);
+      return;
+    }
+    events.push(ev);
+  }
+
+  const blob = new Blob([buildIcs(events)], { type: 'text/calendar;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = icsFileName(ev.title);
+  a.download = events.length === 1 ? icsFileName(events[0].title) : `snap-cal-${events.length}-events.ics`;
   document.body.append(a);
   a.click();
   a.remove();
@@ -260,15 +377,16 @@ function showFormError(msg: string) {
 // ---------- History ----------
 
 function remember() {
-  if (!current) return;
+  if (!current || items.length === 0) return;
+  const first = items[0].values.title.trim() || 'Untitled event';
   renderHistory(
     saveToHistory({
       id: current.id,
       createdAt: new Date().toISOString(),
       thumb: current.thumb,
       text: current.text,
-      title: field('title').value.trim() || 'Untitled event',
-      form: formValues(),
+      title: items.length > 1 ? `${first} + ${items.length - 1} more` : first,
+      forms: items.map((it) => it.values),
     }),
   );
 }
@@ -302,14 +420,15 @@ function renderHistory(entries: HistoryEntry[] = loadHistory()) {
 }
 
 function openEntry(entry: HistoryEntry) {
+  // Entries saved before multi-event support have a single `form`.
+  const forms = entry.forms ?? (entry.form ? [entry.form] : []);
+  if (forms.length === 0) return;
   current = { id: entry.id, thumb: entry.thumb, text: entry.text };
-  restoreForm(entry.form);
   if (previewImg.src.startsWith('blob:')) URL.revokeObjectURL(previewImg.src);
   if (entry.thumb) previewImg.src = entry.thumb;
   preview.hidden = !entry.thumb;
   showError('');
-  review.hidden = false;
-  review.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  showItems(forms.map((values) => ({ values, selected: true })));
 }
 
 $('clear-history').addEventListener('click', () => {

@@ -1,5 +1,6 @@
-// Turns the text read from a poster into a draft calendar event.
-// Everything here is a best guess: the user reviews and edits it before saving.
+// Turns the text read from a poster (or a page listing several events) into
+// draft calendar events. Everything here is a best guess: the user reviews and
+// edits it before saving.
 import * as chrono from 'chrono-node';
 
 /** One line of OCR output. `height` is the text height in pixels, used to spot the headline. */
@@ -7,6 +8,8 @@ export interface OcrLine {
   text: string;
   height: number;
   confidence: number;
+  /** Where the line sits in the image, in pixels. Needed to tell events on a listing apart. */
+  box?: { x0: number; y0: number; x1: number; y1: number };
 }
 
 export interface DraftEvent {
@@ -15,6 +18,8 @@ export interface DraftEvent {
   end: Date | null;
   allDay: boolean;
   location: string;
+  /** The text belonging to this event, for the calendar entry's notes. */
+  notes: string;
 }
 
 export interface ParseOptions {
@@ -27,13 +32,27 @@ export interface ParseOptions {
 const DEFAULT_DURATION_MS = 2 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-// Phrases chrono understands that are never the event date on a poster ("Book now!").
-const IGNORED_DATE_TEXT = /^(now|right now|today only)$/i;
+// Phrases chrono understands that are never the event date on a poster:
+// "Book now!", or the "Night" in "Quiz Night".
+const IGNORED_DATE_TEXT = /^(now|right now|today only|night|morning|afternoon|evening)$/i;
 
 const VENUE_WORDS =
   /\b(club|nightclub|bar|pub|inn|hall|arena|centre|center|theatre|theater|cinema|stadium|park|church|cathedral|hotel|library|museum|gallery|studio|room|street|st\.|road|rd\.|lane|avenue|square|campus|college|university|school|venue|house|court|field|ground|market|shop|cafe|café|restaurant|kitchen|lounge|warehouse)\b/i;
 const UK_POSTCODE = /\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b/;
 const LABELLED_LOCATION = /\b(?:venue|location|where|place|address)\s*[:\-]\s*(.+)/i;
+
+/**
+ * Finds every event in the image. A single poster gives one event; a page
+ * such as a "What's on" listing with several dated entries gives one per entry,
+ * sorted by date. Always returns at least one (possibly empty) draft.
+ */
+export function parseEvents(text: string, lines: OcrLine[] = [], opts: ParseOptions = {}): DraftEvent[] {
+  const groups = splitIntoEvents(lines, opts.ref ?? new Date(), opts.dayFirst ?? true);
+  if (!groups) return [parseEvent(text, lines, opts)];
+  return groups
+    .map((g) => parseEvent(g.map((l) => l.text).join('\n'), g, opts))
+    .sort((a, b) => (a.start?.getTime() ?? Infinity) - (b.start?.getTime() ?? Infinity));
+}
 
 export function parseEvent(text: string, lines: OcrLine[] = [], opts: ParseOptions = {}): DraftEvent {
   const ref = opts.ref ?? new Date();
@@ -44,7 +63,7 @@ export function parseEvent(text: string, lines: OcrLine[] = [], opts: ParseOptio
   const location = findLocation(ocrLines, dateTexts);
   const title = findTitle(ocrLines, dateTexts, location);
 
-  return { title, start, end, allDay, location };
+  return { title, start, end, allDay, location, notes: cleaned };
 }
 
 /** Tidy common OCR quirks so the date parser has a fair chance. */
@@ -60,14 +79,129 @@ export function normalise(text: string): string {
     .join('\n');
 }
 
+// ---------- Splitting a listing into separate events ----------
+
+type Box = NonNullable<OcrLine['box']>;
+type BoxedLine = OcrLine & { box: Box };
+
+/**
+ * Groups the lines of a multi-event page, one group per event, or returns
+ * null when the image looks like a single event.
+ *
+ * Every line containing an exact date is an "anchor". Lines are split into
+ * columns by their horizontal position; inside a column, stacked events are
+ * separated at the biggest vertical gap between neighbouring anchors.
+ */
+function splitIntoEvents(lines: OcrLine[], ref: Date, dayFirst: boolean): OcrLine[][] | null {
+  if (lines.length < 4 || !lines.every((l) => l.box)) return null;
+  const parser = dayFirst ? chrono.en.GB : chrono.en;
+
+  // Anchor -> the day it names, so repeats of the same date can be merged.
+  const anchorDay = new Map<OcrLine, string>();
+  for (const l of lines) {
+    const r = parser
+      .parse(normalise(l.text), ref, { forwardDate: true })
+      .find((x) => x.start.isCertain('day') && !IGNORED_DATE_TEXT.test(x.text.trim()));
+    if (r) anchorDay.set(l, r.start.date().toDateString());
+  }
+  if (anchorDay.size < 2) return null;
+
+  // Dates are kept even when the OCR is unsure of them: small date text next
+  // to icons often scores low but is read correctly.
+  const kept = (lines as BoxedLine[]).filter((l) => anchorDay.has(l) || !isNoise(l));
+  const unit = median(kept.map((l) => l.box.y1 - l.box.y0)) || 1;
+
+  const groups: OcrLine[][] = [];
+  for (const column of findColumns(kept)) {
+    column.sort((a, b) => a.box.y0 - b.box.y0);
+    const anchorIdx: number[] = [];
+    column.forEach((l, i) => {
+      if (!anchorDay.has(l)) return;
+      const prev = anchorIdx.length ? column[anchorIdx[anchorIdx.length - 1]] : null;
+      // "Fri 3 Oct" just above "03/10/2026" is one event, not two.
+      if (prev && anchorDay.get(prev) === anchorDay.get(l) && l.box.y0 - prev.box.y1 < 3 * unit) return;
+      anchorIdx.push(i);
+    });
+    if (anchorIdx.length === 0) continue; // headings or stray text with no date
+
+    let from = 0;
+    for (let k = 0; k < anchorIdx.length; k++) {
+      let to = column.length;
+      if (k + 1 < anchorIdx.length) {
+        // Cut at the widest gap between this anchor and the next one.
+        let best = anchorIdx[k] + 1;
+        let bestGap = -Infinity;
+        for (let i = anchorIdx[k] + 1; i <= anchorIdx[k + 1]; i++) {
+          const gap = column[i].box.y0 - column[i - 1].box.y1;
+          if (gap > bestGap) {
+            bestGap = gap;
+            best = i;
+          }
+        }
+        to = best;
+      }
+      groups.push(dropDistantHeading(column.slice(from, to), column[anchorIdx[k]], unit));
+      from = to;
+    }
+  }
+  return groups.length >= 2 ? groups : null;
+}
+
+/** Drops text far above the event's date block, such as a "Featured Events" page heading. */
+function dropDistantHeading(group: BoxedLine[], anchor: BoxedLine, unit: number): BoxedLine[] {
+  let start = 0;
+  for (let i = 1; i <= group.indexOf(anchor); i++) {
+    if (group[i].box.y0 - group[i - 1].box.y1 > 8 * unit) start = i;
+  }
+  return group.slice(start);
+}
+
+/** Splits lines into side-by-side columns (e.g. cards on an events page). */
+function findColumns(lines: BoxedLine[]): BoxedLine[][] {
+  const left = Math.min(...lines.map((l) => l.box.x0));
+  const pageWidth = Math.max(...lines.map((l) => l.box.x1)) - left;
+  // Very wide lines (page headings, footers) would join every column together.
+  const narrow = lines.filter((l) => l.box.x1 - l.box.x0 <= pageWidth * 0.5);
+  if (narrow.length < lines.length / 2) return [lines];
+
+  const sorted = [...narrow].sort((a, b) => a.box.x0 - b.box.x0);
+  const columns: { x1: number; lines: BoxedLine[] }[] = [];
+  for (const l of sorted) {
+    const col = columns[columns.length - 1];
+    if (col && l.box.x0 < col.x1 - 10) {
+      col.lines.push(l);
+      col.x1 = Math.max(col.x1, l.box.x1);
+    } else {
+      columns.push({ x1: l.box.x1, lines: [l] });
+    }
+  }
+  return columns.length > 1 ? columns.map((c) => c.lines) : [lines];
+}
+
+/** Stray marks read from photos and graphics. */
+function isNoise(l: OcrLine): boolean {
+  return l.confidence < 50 || l.text.replace(/[^A-Za-z]/g, '').length < 2;
+}
+
+function median(xs: number[]): number {
+  if (xs.length === 0) return 0;
+  const s = [...xs].sort((a, b) => a - b);
+  return s[Math.floor(s.length / 2)];
+}
+
+// ---------- Reading one event ----------
+
 function textToLines(text: string): OcrLine[] {
   return text.split('\n').map((t) => ({ text: t, height: 0, confidence: 100 }));
 }
 
 function findWhen(text: string, ref: Date, dayFirst: boolean) {
   const parser = dayFirst ? chrono.en.GB : chrono.en;
-  const results = parser
-    .parse(text, ref, { forwardDate: true })
+  // One line at a time: across line breaks, a title like "Quiz Night" above
+  // "Thursday 8th October" is misread as "tonight".
+  const results = text
+    .split('\n')
+    .flatMap((line) => parser.parse(line, ref, { forwardDate: true }))
     .filter((r) => !IGNORED_DATE_TEXT.test(r.text.trim()));
   const dateTexts = results.map((r) => r.text);
 
@@ -151,8 +285,10 @@ function findLocation(lines: OcrLine[], dateTexts: string[]): string {
       if (loc) return loc;
     }
   }
-  for (const t of texts) {
-    if (VENUE_WORDS.test(t) || UK_POSTCODE.test(t)) {
+  // A venue name ("The Edge Cafe") beats a bare postcode.
+  for (const pattern of [VENUE_WORDS, UK_POSTCODE]) {
+    for (const t of texts) {
+      if (!pattern.test(t)) continue;
       const loc = tidyLocation(t, dateTexts);
       if (loc) return loc;
     }
@@ -175,16 +311,18 @@ function findTitle(lines: OcrLine[], dateTexts: string[], location: string): str
   const tallest = Math.max(...candidates.map((l) => l.height));
   if (tallest <= 0) return candidates[0].text;
 
-  // Headlines are often split over two or three lines of the same size, so
-  // join consecutive lines that are about as tall as the tallest one.
+  // Headlines are often split over several lines of the same size, so join
+  // the neighbouring lines (above and below) that are about as tall.
   const idx = lines.indexOf(candidates.find((l) => l.height === tallest)!);
-  const parts = [lines[idx].text];
-  for (let i = idx + 1; i < lines.length && parts.length < 3; i++) {
-    const l = lines[i];
-    if (!isTitleCandidate(l, dateTexts, location) || l.height < tallest * 0.8) break;
-    parts.push(l.text);
-  }
-  return parts.join(' ');
+  const sameSize = (l: OcrLine) => isTitleCandidate(l, dateTexts, location) && l.height >= tallest * 0.85;
+  let first = idx;
+  let last = idx;
+  while (last - first < 3 && first > 0 && sameSize(lines[first - 1])) first--;
+  while (last - first < 3 && last + 1 < lines.length && sameSize(lines[last + 1])) last++;
+  return lines
+    .slice(first, last + 1)
+    .map((l) => l.text)
+    .join(' ');
 }
 
 function isTitleCandidate(line: OcrLine, dateTexts: string[], location: string): boolean {
@@ -193,7 +331,8 @@ function isTitleCandidate(line: OcrLine, dateTexts: string[], location: string):
   if (letters < 3 || line.confidence < 50) return false;
   // Mostly symbols and noise from graphics.
   if (letters / t.replace(/\s/g, '').length < 0.6) return false;
-  if (location && t.includes(location)) return false;
+  // The venue line itself ("@ Vinyl Nightclub"), but not "Live Music @ Hot Numbers".
+  if (location && t.includes(location) && location.length >= t.length * 0.6) return false;
   // Mostly a date or time.
   const dateChars = dateTexts.filter((d) => t.includes(d)).reduce((n, d) => n + d.length, 0);
   return dateChars < t.length * 0.5;

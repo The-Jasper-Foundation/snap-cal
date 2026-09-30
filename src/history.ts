@@ -6,8 +6,10 @@ export interface HistoryEntry {
   thumb: string;
   text: string;
   title: string;
-  /** The event form as last saved, so a scan can be reopened. */
-  form: Record<string, string>;
+  /** The event form for each event found, as last saved, so a scan can be reopened. */
+  forms?: Record<string, string>[];
+  /** Older entries (from before multi-event scans) hold a single form. */
+  form?: Record<string, string>;
 }
 
 const KEY = 'snapcal.history';

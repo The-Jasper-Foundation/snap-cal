@@ -2,18 +2,23 @@
 
 **Snap → Scan → Schedule.** Take a photo of an event poster and turn it into a calendar event with reminders.
 
+### 👉 [Open Snap Cal](https://the-jasper-foundation.github.io/snap-cal/)
+
+`https://the-jasper-foundation.github.io/snap-cal/`: nothing to download. Open it on your phone or computer and start scanning.
+
 Snap Cal reads the poster, fills in the event name, date, time and venue, and lets you check them before anything is saved. Then add it to Apple Calendar, Outlook, Windows Calendar or Google Calendar in one tap.
 
+- **Several events at once:** snap a "What's on" page, a listings screenshot or a flyer with several dates, and Snap Cal finds each event. Untick the ones you don't want and add the rest in one go.
 - **Works everywhere:** it runs in any modern browser on iPhone, Android, Mac and Windows, and you can install it like an app.
 - **Private:** your photos are read on your own device and never uploaded. There are no accounts, no tracking and no server.
 - **Free and open source** under the MIT licence.
 
 ## Using it
 
-1. Open the app. The link is under **About** on this GitHub page once Pages is turned on.
+1. Open **[the-jasper-foundation.github.io/snap-cal](https://the-jasper-foundation.github.io/snap-cal/)**.
 2. Tap **Snap poster** to use your camera, or **Upload image**. On a computer you can also drag an image in or paste one.
-3. Check the details. Fix anything it got wrong and choose your reminders.
-4. Tap **Add to calendar**. This saves an `.ics` file that includes your reminders.
+3. Check the details. Fix anything it got wrong and choose your reminders. If the image shows several events, you'll see a list: untick any you don't want, and tap one to check its details.
+4. Tap **Add to calendar**. This saves an `.ics` file that includes your reminders and every ticked event.
    - **iPhone / iPad / Mac:** Safari offers "Add to Calendar" straight away. On a Mac you can also open the downloaded file.
    - **Windows:** open the downloaded file and it goes into Outlook or the Calendar app.
    - **Android:** open the downloaded file with Google Calendar.
@@ -29,6 +34,7 @@ Snap Cal reads the poster, fills in the event name, date, time and venue, and le
 | --- | --- |
 | Reading text | [tesseract.js](https://github.com/naptha/tesseract.js), running in the browser in sparse-text mode (built for posters) |
 | Finding the date and time | [chrono](https://github.com/wanasit/chrono), plus a few rules for posters: split date and time lines, "9pm–2am" running past midnight, and matching the weekday to the right year |
+| Finding several events | Each exact date is treated as one event; text is grouped into columns by position (e.g. cards on a web page), and stacked events are split at the gap between them |
 | Finding the title | The largest text on the poster, which is usually the headline |
 | Finding the venue | `Venue:` labels, `@ Place`, `at The Place`, venue words (club, hall, theatre, …) and UK postcodes |
 | Saving the event | A standard iCalendar `.ics` file with `VALARM` reminders |
@@ -50,7 +56,7 @@ npm run build    # build the site into dist/
 
 1. Push this repository to GitHub.
 2. In the repository, go to **Settings → Pages** and set **Source** to **GitHub Actions**.
-3. Each push to `main` runs the tests, builds the site and publishes it to `https://<your-username>.github.io/<repo-name>/`.
+3. Each push to `main` runs the tests, builds the site and publishes it to `https://<your-username>.github.io/<repo-name>/`. This repository is published at <https://the-jasper-foundation.github.io/snap-cal/>.
 
 ## Contributing
 

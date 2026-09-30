@@ -56,6 +56,7 @@ export async function readPoster(image: Blob, progress: Progress): Promise<OcrRe
           text,
           height: line.rowAttributes?.rowHeight || line.bbox.y1 - line.bbox.y0,
           confidence: line.confidence,
+          box: { x0: line.bbox.x0, y0: line.bbox.y0, x1: line.bbox.x1, y1: line.bbox.y1 },
         });
       }
     }
